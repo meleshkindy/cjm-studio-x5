@@ -1,0 +1,15 @@
+.tools/
+.cache/
+.pnpm-store/
+.docx_review/
+data/
+dist/
+web/node_modules/
+web/dist/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

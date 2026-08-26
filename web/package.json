@@ -1,0 +1,30 @@
+{
+  "name": "cjm-studio-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@tiptap/extension-image": "3.30.1",
+    "@tiptap/extension-link": "3.30.1",
+    "@tiptap/pm": "3.30.1",
+    "@tiptap/react": "3.30.1",
+    "@tiptap/starter-kit": "3.30.1",
+    "@xyflow/react": "12.11.2",
+    "lucide-react": "1.31.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "typescript": "7.0.2",
+    "vite": "8.2.1"
+  },
+  "packageManager": "pnpm@11.19.0"
+}
