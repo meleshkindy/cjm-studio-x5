@@ -1,27 +1,35 @@
 import type { ReactNode } from 'react'
-import { Archive, BookOpen, Map, Route } from 'lucide-react'
+import { Archive, BookOpen, KeyRound, LogOut, Map, Route, Users } from 'lucide-react'
+import type { AppUser } from '../types'
 
-export type AppSection = 'cjms' | 'directories' | 'backups'
+export type AppSection = 'cjms' | 'directories' | 'backups' | 'users'
 
 interface LayoutProps {
   section: AppSection
   onSection: (section: AppSection) => void
+  user: AppUser
+  authenticationEnabled: boolean
+  restorePasswordUrl?: string
+  onLogout: () => void
   children: ReactNode
 }
 
-export function Layout({ section, onSection, children }: LayoutProps) {
+export function Layout({ section, onSection, user, authenticationEnabled, restorePasswordUrl, onLogout, children }: LayoutProps) {
+  const isAdmin = user.role === 'admin'
+  const initials = user.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'П'
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark"><Route size={18} /></span><span>CJM Studio</span></div>
         <nav className="main-nav" aria-label="Основная навигация">
           <button className={section === 'cjms' ? 'active' : ''} onClick={() => onSection('cjms')}><Map size={17} /><span>CJM</span></button>
-          <button className={section === 'directories' ? 'active' : ''} onClick={() => onSection('directories')}><BookOpen size={17} /><span>Справочники</span></button>
-          <button className={section === 'backups' ? 'active' : ''} onClick={() => onSection('backups')}><Archive size={17} /><span>Резервные копии</span></button>
+          {isAdmin && <button className={section === 'directories' ? 'active' : ''} onClick={() => onSection('directories')}><BookOpen size={17} /><span>Справочники</span></button>}
+          {isAdmin && <button className={section === 'users' ? 'active' : ''} onClick={() => onSection('users')}><Users size={17} /><span>Пользователи</span></button>}
+          {isAdmin && <button className={section === 'backups' ? 'active' : ''} onClick={() => onSection('backups')}><Archive size={17} /><span>Резервные копии</span></button>}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sidebar-foot">Локальная версия<br />Данные на этом компьютере</div>
-          <div className="sidebar-user" aria-label="Локальный пользователь" title="Локальный пользователь"><span className="avatar">ЛП</span></div>
+          <div className="sidebar-foot">{authenticationEnabled ? 'Вход через X5' : 'Локальная версия'}<br />{roleLabel(user.role)}</div>
+          <div className="sidebar-user"><span className="avatar" aria-label={user.displayName} title={`${user.displayName} · ${roleLabel(user.role)}`}>{initials}</span>{authenticationEnabled && restorePasswordUrl && <a href={restorePasswordUrl} target="_blank" rel="noreferrer" aria-label="Изменить пароль" title="Изменить пароль"><KeyRound size={16} /></a>}{authenticationEnabled && <button type="button" aria-label="Выйти" title="Выйти" onClick={onLogout}><LogOut size={16} /></button>}</div>
         </div>
       </aside>
       <div className="app-main">
@@ -29,4 +37,8 @@ export function Layout({ section, onSection, children }: LayoutProps) {
       </div>
     </div>
   )
+}
+
+function roleLabel(role: AppUser['role']) {
+  return ({ admin: 'Администратор', editor: 'Редактор', viewer: 'Просмотр' } as const)[role]
 }

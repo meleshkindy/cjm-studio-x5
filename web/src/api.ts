@@ -1,4 +1,4 @@
-import type { ActionComment, Bootstrap, CJMDocument, DirectoryKind, DirectoryRecord, Revision } from './types'
+import type { ActionComment, AppUser, Bootstrap, CJMDocument, DirectoryKind, DirectoryRecord, Revision } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -9,11 +9,15 @@ export class ApiError extends Error {
   }
 }
 
+let tokenProvider: (() => Promise<string | undefined>) | undefined
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const token = await tokenProvider?.()
   const response = await fetch(url, {
     ...options,
     headers: {
       ...(options?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
   })
@@ -26,6 +30,11 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  setTokenProvider: (provider?: () => Promise<string | undefined>) => { tokenProvider = provider },
+  me: () => request<AppUser>('/api/auth/me'),
+  users: () => request<AppUser[]>('/api/admin/users'),
+  updateUserAccess: (subject: string, companyIds: string[], cjmIds: string[]) =>
+    request<AppUser>(`/api/admin/users/${encodeURIComponent(subject)}/access`, { method: 'PUT', body: JSON.stringify({ companyIds, cjmIds }) }),
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   getCJM: (id: string) => request<CJMDocument>(`/api/cjms/${id}`),
   createCJM: (input: { name: string; companyId: string; actorId: string }) =>

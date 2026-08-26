@@ -19,7 +19,7 @@ func normalizeCommentBody(body string) (string, error) {
 	return body, nil
 }
 
-func actionCJMID(ctx context.Context, db *sql.DB, actionID string) (string, error) {
+func actionCJMID(ctx context.Context, db *database, actionID string) (string, error) {
 	var cjmID string
 	err := db.QueryRowContext(ctx, `
 		SELECT s.cjm_id
@@ -53,6 +53,10 @@ func (s *Store) ListActionComments(ctx context.Context, actionID string) ([]doma
 }
 
 func (s *Store) CreateActionComment(ctx context.Context, actionID, body string) (domain.ActionComment, error) {
+	return s.CreateActionCommentAs(ctx, actionID, body, localUser)
+}
+
+func (s *Store) CreateActionCommentAs(ctx context.Context, actionID, body, author string) (domain.ActionComment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var item domain.ActionComment
@@ -65,7 +69,7 @@ func (s *Store) CreateActionComment(ctx context.Context, actionID, body string) 
 		return item, err
 	}
 	t := now()
-	item = domain.ActionComment{ID: newID(), ActionID: actionID, Author: localUser, Body: body, CreatedAt: t, UpdatedAt: t}
+	item = domain.ActionComment{ID: newID(), ActionID: actionID, Author: auditName(author), Body: body, CreatedAt: t, UpdatedAt: t}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO action_comments(id,cjm_id,action_id,author,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, item.ID, cjmID, item.ActionID, item.Author, item.Body, item.CreatedAt, item.UpdatedAt)
 	return item, err
 }

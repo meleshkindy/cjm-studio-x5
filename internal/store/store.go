@@ -21,8 +21,6 @@ import (
 	"time"
 
 	"cjmstudio/internal/domain"
-
-	_ "modernc.org/sqlite"
 )
 
 const localUser = "Локальный пользователь"
@@ -30,9 +28,10 @@ const localUser = "Локальный пользователь"
 var emptyDoc = json.RawMessage(`{"type":"doc","content":[{"type":"paragraph"}]}`)
 
 type Store struct {
-	mu   sync.RWMutex
-	db   *sql.DB
-	path string
+	mu        sync.RWMutex
+	db        *database
+	path      string
+	backupDir string
 }
 
 type ConflictError struct{ Message string }
@@ -47,15 +46,15 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := openDB(path)
+	db, err := openSQLiteDB(path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if err := executeSchema(context.Background(), db, sqliteSchemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
-	s := &Store{db: db, path: path}
+	s := &Store{db: db, path: path, backupDir: filepath.Dir(path)}
 	if err := s.seed(); err != nil {
 		db.Close()
 		return nil, err
@@ -63,19 +62,51 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-func openDB(path string) (*sql.DB, error) {
+func openSQLiteDB(path string) (*database, error) {
 	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-	db, err := sql.Open("sqlite", dsn)
+	raw, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	raw.SetMaxOpenConns(1)
+	db := &database{raw: raw, dialect: dialectSQLite}
 	if err := db.Ping(); err != nil {
-		db.Close()
+		raw.Close()
 		return nil, err
 	}
 	return db, nil
 }
+
+func OpenPostgres(ctx context.Context, databaseURL, backupDir string) (*Store, error) {
+	if strings.TrimSpace(databaseURL) == "" {
+		return nil, &ValidationError{Message: "строка подключения PostgreSQL обязательна"}
+	}
+	if strings.TrimSpace(backupDir) == "" {
+		backupDir = os.TempDir()
+	}
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return nil, err
+	}
+	raw, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	raw.SetMaxOpenConns(10)
+	raw.SetMaxIdleConns(2)
+	raw.SetConnMaxLifetime(30 * time.Minute)
+	db := &database{raw: raw, dialect: dialectPostgres}
+	if err := db.PingContext(ctx); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
+	}
+	if err := executeSchema(ctx, db, postgresSchemaSQL); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("initialize PostgreSQL schema: %w", err)
+	}
+	return &Store{db: db, backupDir: backupDir}, nil
+}
+
+func (s *Store) EnsureSeeded() error { return s.seed() }
 
 func (s *Store) Close() error {
 	s.mu.Lock()
@@ -84,6 +115,17 @@ func (s *Store) Close() error {
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339) }
+
+func auditName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return localUser
+	}
+	if chars := []rune(value); len(chars) > 200 {
+		value = string(chars[:200])
+	}
+	return value
+}
 
 func newID() string {
 	b := make([]byte, 16)
@@ -104,21 +146,25 @@ func copyDoc(in json.RawMessage) json.RawMessage {
 }
 
 func (s *Store) seed() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM companies`).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if tx.dialect == dialectPostgres {
+		if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtext('cjm-studio-seed'))`); err != nil {
+			return err
+		}
+	}
+	var count int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM companies`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
 	t := now()
 	companyA, companyB := newID(), newID()
 	for _, row := range []struct{ id, code, name string }{
@@ -355,13 +401,20 @@ func directoryCodePrefix(kind string) (string, error) {
 	}
 }
 
-func nextDirectoryCode(ctx context.Context, tx *sql.Tx, kind, table string) (string, error) {
+func nextDirectoryCode(ctx context.Context, tx *transaction, kind, table string) (string, error) {
 	prefix, err := directoryCodePrefix(kind)
 	if err != nil {
 		return "", err
 	}
 	var next int
-	err = tx.QueryRowContext(ctx, `SELECT next_value FROM directory_counters WHERE kind=?`, kind).Scan(&next)
+	query := `SELECT next_value FROM directory_counters WHERE kind=?`
+	if tx.dialect == dialectPostgres {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext(?))`, "cjm-directory-"+kind); err != nil {
+			return "", err
+		}
+		query += ` FOR UPDATE`
+	}
+	err = tx.QueryRowContext(ctx, query, kind).Scan(&next)
 	if errors.Is(err, sql.ErrNoRows) {
 		rows, queryErr := tx.QueryContext(ctx, fmt.Sprintf(`SELECT business_code FROM %s`, table))
 		if queryErr != nil {
@@ -435,15 +488,20 @@ func translateConstraint(err error) error {
 		return nil
 	}
 	text := strings.ToLower(err.Error())
-	if strings.Contains(text, "constraint") || strings.Contains(text, "unique") || strings.Contains(text, "foreign key") {
+	if strings.Contains(text, "constraint") || strings.Contains(text, "unique") || strings.Contains(text, "foreign key") || strings.Contains(text, "duplicate key") || strings.Contains(text, "sqlstate 235") {
 		return &ConflictError{Message: "операция нарушает уникальность или связанные данные"}
 	}
 	return err
 }
 
 func (s *Store) CreateCJM(ctx context.Context, name, companyID, actorID string) (*domain.CJMDocument, error) {
+	return s.CreateCJMAs(ctx, name, companyID, actorID, localUser)
+}
+
+func (s *Store) CreateCJMAs(ctx context.Context, name, companyID, actorID, author string) (*domain.CJMDocument, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	author = auditName(author)
 	name = strings.TrimSpace(name)
 	if name == "" || companyID == "" || actorID == "" {
 		return nil, &ValidationError{Message: "название, компания и актор обязательны"}
@@ -456,7 +514,7 @@ func (s *Store) CreateCJM(ctx context.Context, name, companyID, actorID string) 
 		return nil, &ValidationError{Message: "актор должен принадлежать компании CJM"}
 	}
 	id, t := newID(), now()
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO cjms(id,name,company_id,actor_id,created_at,updated_at,created_by,updated_by,row_version,current_revision) VALUES(?,?,?,?,?,?,?,?,1,0)`, id, name, companyID, actorID, t, t, localUser, localUser); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO cjms(id,name,company_id,actor_id,created_at,updated_at,created_by,updated_by,row_version,current_revision) VALUES(?,?,?,?,?,?,?,?,1,0)`, id, name, companyID, actorID, t, t, author, author); err != nil {
 		return nil, translateConstraint(err)
 	}
 	stageID, stepID := newID(), newID()
@@ -475,7 +533,7 @@ func (s *Store) GetCJM(ctx context.Context, id string) (*domain.CJMDocument, err
 	return getCJM(ctx, s.db, id)
 }
 
-func getCJM(ctx context.Context, db *sql.DB, id string) (*domain.CJMDocument, error) {
+func getCJM(ctx context.Context, db *database, id string) (*domain.CJMDocument, error) {
 	doc := &domain.CJMDocument{Stages: []domain.Stage{}, Links: []domain.StepLink{}, Initiatives: []domain.Initiative{}, InitiativeLinks: []domain.InitiativeLink{}}
 	err := db.QueryRowContext(ctx, `SELECT id,name,company_id,actor_id,created_at,updated_at,created_by,updated_by,row_version,current_revision FROM cjms WHERE id=?`, id).Scan(&doc.ID, &doc.Name, &doc.CompanyID, &doc.ActorID, &doc.CreatedAt, &doc.UpdatedAt, &doc.CreatedBy, &doc.UpdatedBy, &doc.RowVersion, &doc.CurrentRevision)
 	if err != nil {
@@ -566,7 +624,7 @@ func getCJM(ctx context.Context, db *sql.DB, id string) (*domain.CJMDocument, er
 		return nil, err
 	}
 
-	linkRows, err := db.QueryContext(ctx, `SELECT id,source_step_id,target_step_id,link_type FROM step_links WHERE cjm_id=? ORDER BY rowid`, id)
+	linkRows, err := db.QueryContext(ctx, `SELECT id,source_step_id,target_step_id,link_type FROM step_links WHERE cjm_id=? ORDER BY id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +668,7 @@ func getCJM(ctx context.Context, db *sql.DB, id string) (*domain.CJMDocument, er
 	return doc, nil
 }
 
-func loadStateRefs(ctx context.Context, db *sql.DB, cjmID string, locations map[string][3]int, doc *domain.CJMDocument) error {
+func loadStateRefs(ctx context.Context, db *database, cjmID string, locations map[string][3]int, doc *domain.CJMDocument) error {
 	queries := []struct {
 		sql         string
 		participant bool

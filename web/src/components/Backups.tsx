@@ -27,13 +27,12 @@ export function Backups({ onRestored }: BackupsProps) {
 
   return (
     <>
-      <div className="page-heading"><div><h1>Резервные копии</h1><p>Перенос локальной базы между Windows и macOS</p></div></div>
+      <div className="page-heading"><div><h1>Резервные копии</h1><p>Перенос данных PostgreSQL между установками CJM Studio</p></div></div>
       <div className="backup-grid">
-        <section className="panel backup-card"><span className="feature-icon"><Download size={22} /></span><div><h2>Создать копию</h2><p>Сохраняет справочники, CJM, версии и изображения Rich Text в одном файле SQLite.</p></div><a className="button primary" href="/api/backup"><HardDrive size={17} />Скачать копию</a></section>
-        <section className="panel backup-card"><span className="feature-icon"><Upload size={22} /></span><div><h2>Восстановить</h2><p>Проверяет целостность файла и заменяет текущую локальную базу.</p></div><input ref={inputRef} type="file" accept=".sqlite,.db" hidden onChange={(event) => restore(event.target.files?.[0])} /><button className="button" disabled={busy} onClick={() => inputRef.current?.click()}><RotateCcw size={17} />{busy ? 'Восстановление…' : 'Выбрать копию'}</button></section>
+        <section className="panel backup-card"><span className="feature-icon"><Download size={22} /></span><div><h2>Создать копию</h2><p>Выгружает справочники, CJM, версии, комментарии и изображения Rich Text из PostgreSQL в один файл SQLite.</p></div><a className="button primary" href="/api/backup"><HardDrive size={17} />Скачать копию</a></section>
+        <section className="panel backup-card"><span className="feature-icon"><Upload size={22} /></span><div><h2>Восстановить</h2><p>Проверяет целостность файла и транзакционно заменяет данные в PostgreSQL.</p></div><input ref={inputRef} type="file" accept=".sqlite,.db" hidden onChange={(event) => restore(event.target.files?.[0])} /><button className="button" disabled={busy} onClick={() => inputRef.current?.click()}><RotateCcw size={17} />{busy ? 'Восстановление…' : 'Выбрать копию'}</button></section>
       </div>
       {message && <div className="notice success">{message}</div>}
     </>
   )
 }
-

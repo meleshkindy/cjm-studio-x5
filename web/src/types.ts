@@ -7,6 +7,29 @@ export const emptyRichDoc: RichDoc = {
 
 export type DirectoryKind = 'companies' | 'actors' | 'participants' | 'systems'
 
+export type UserRole = 'admin' | 'editor' | 'viewer'
+
+export interface AuthConfig {
+  enabled: boolean
+  url?: string
+  realm?: string
+  clientId?: string
+  restorePasswordUrl?: string
+}
+
+export interface AppUser {
+  subject: string
+  username: string
+  displayName: string
+  email?: string
+  role: UserRole
+  companyIds: string[]
+  cjmIds: string[]
+  lastSeenAt?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
 export interface DirectoryRecord {
   id: string
   companyId?: string

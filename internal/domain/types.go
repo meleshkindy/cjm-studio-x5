@@ -10,6 +10,24 @@ type DirectoryRecord struct {
 	Description string `json:"description,omitempty"`
 }
 
+type AppUser struct {
+	Subject     string   `json:"subject"`
+	Username    string   `json:"username"`
+	DisplayName string   `json:"displayName"`
+	Email       string   `json:"email,omitempty"`
+	Role        string   `json:"role"`
+	CompanyIDs  []string `json:"companyIds"`
+	CJMIDs      []string `json:"cjmIds"`
+	LastSeenAt  string   `json:"lastSeenAt"`
+	CreatedAt   string   `json:"createdAt"`
+	UpdatedAt   string   `json:"updatedAt"`
+}
+
+type UserAccess struct {
+	CompanyIDs []string `json:"companyIds"`
+	CJMIDs     []string `json:"cjmIds"`
+}
+
 type CJMSummary struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`

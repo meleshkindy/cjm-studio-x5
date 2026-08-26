@@ -32,18 +32,43 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	dataDir := flag.String("data-dir", defaultDataDir, "каталог базы данных")
+	dataDir := flag.String("data-dir", defaultDataDir, "каталог временных резервных копий")
+	databaseURL := flag.String("database-url", "", "строка подключения PostgreSQL")
+	databaseURLFile := flag.String("database-url-file", os.Getenv("CJM_DATABASE_URL_FILE"), "файл со строкой подключения PostgreSQL")
+	importSQLite := flag.String("import-sqlite", os.Getenv("CJM_SQLITE_IMPORT"), "SQLite-копия для первичного импорта в пустую PostgreSQL")
+	listenAddress := flag.String("listen", envOrDefault("CJM_LISTEN_ADDRESS", "127.0.0.1"), "адрес прослушивания; для сервера обычно 0.0.0.0")
 	port := flag.Int("port", 0, "локальный порт; 0 выбирает свободный")
 	noBrowser := flag.Bool("no-browser", false, "не открывать браузер автоматически")
 	flag.Parse()
 
-	st, err := store.Open(filepath.Join(*dataDir, "cjm-studio.sqlite"))
+	resolvedDatabaseURL, err := databaseURLFromConfig(*databaseURL, *databaseURLFile, *dataDir)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		log.Fatalf("read PostgreSQL configuration: %v", err)
+	}
+	st, err := store.OpenPostgres(context.Background(), resolvedDatabaseURL, *dataDir)
+	if err != nil {
+		log.Fatalf("open PostgreSQL: %v", err)
 	}
 	defer st.Close()
+	if strings.TrimSpace(*importSQLite) != "" {
+		imported, err := st.ImportSQLiteIfEmpty(context.Background(), *importSQLite)
+		if err != nil {
+			log.Fatalf("import SQLite: %v", err)
+		}
+		if imported {
+			log.Printf("Данные импортированы из %s", *importSQLite)
+		} else {
+			log.Printf("Импорт SQLite пропущен: PostgreSQL уже содержит данные")
+		}
+	}
+	if err := st.EnsureSeeded(); err != nil {
+		log.Fatalf("initialize data: %v", err)
+	}
 
-	apiServer := api.New(st)
+	apiServer, err := api.NewWithAuth(st, authConfigFromEnv())
+	if err != nil {
+		log.Fatalf("configure authentication: %v", err)
+	}
 	dist, err := fs.Sub(webFiles, "web/dist")
 	if err != nil {
 		log.Fatal(err)
@@ -52,11 +77,15 @@ func main() {
 	mux.Handle("/api/", apiServer.Handler())
 	mux.Handle("/", spaHandler(dist))
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port))
+	listener, err := net.Listen("tcp", net.JoinHostPort(*listenAddress, fmt.Sprint(*port)))
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
-	url := "http://" + listener.Addr().String()
+	browserHost := *listenAddress
+	if browserHost == "0.0.0.0" || browserHost == "::" || browserHost == "" {
+		browserHost = "127.0.0.1"
+	}
+	url := "http://" + net.JoinHostPort(browserHost, fmt.Sprint(listener.Addr().(*net.TCPAddr).Port))
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 
 	log.Printf("CJM Studio запущена: %s", url)
@@ -82,12 +111,70 @@ func main() {
 	server.Shutdown(ctx)
 }
 
+func authConfigFromEnv() api.AuthConfig {
+	config := api.AuthConfig{
+		URL:                firstEnv("CJM_KEYCLOAK_URL", "VITE_KEYCLOAK_URL"),
+		Realm:              firstEnv("CJM_KEYCLOAK_REALM", "VITE_KEYCLOAK_REALM"),
+		ClientID:           firstEnv("CJM_KEYCLOAK_CLIENT_ID", "VITE_KEYCLOAK_CLIENT_ID"),
+		RestorePasswordURL: firstEnv("CJM_RESTORE_PASSWORD_URL", "VITE_RESTORE_PASSWORD_URL"),
+	}
+	config.Enabled = config.URL != "" || config.Realm != "" || config.ClientID != ""
+	if value := strings.TrimSpace(os.Getenv("CJM_AUTH_ENABLED")); value != "" {
+		config.Enabled = strings.EqualFold(value, "true") || value == "1" || strings.EqualFold(value, "yes")
+	}
+	return config
+}
+
+func firstEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
 func userDataDir() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(base, "CJM Studio"), nil
+}
+
+func databaseURLFromConfig(flagValue, fileValue, dataDir string) (string, error) {
+	if value := strings.TrimSpace(flagValue); value != "" {
+		return value, nil
+	}
+	if value := strings.TrimSpace(os.Getenv("CJM_DATABASE_URL")); value != "" {
+		return value, nil
+	}
+	if value := strings.TrimSpace(os.Getenv("DATABASE_URL")); value != "" {
+		return value, nil
+	}
+	explicitFile := strings.TrimSpace(fileValue) != ""
+	path := strings.TrimSpace(fileValue)
+	if path == "" {
+		path = filepath.Join(dataDir, "postgres-url.txt")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && !explicitFile {
+			return "", nil
+		}
+		return "", err
+	}
+	if value := strings.TrimSpace(string(data)); value != "" {
+		return value, nil
+	}
+	return "", &store.ValidationError{Message: "файл подключения PostgreSQL пуст"}
 }
 
 func openBrowser(rawURL string) error {

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -152,7 +151,7 @@ func validateRichNode(node richNode, depth int) error {
 	return nil
 }
 
-func (s *Store) validateDocument(ctx context.Context, db *sql.DB, doc *domain.CJMDocument) error {
+func (s *Store) validateDocument(ctx context.Context, db *database, doc *domain.CJMDocument) error {
 	doc.Name = strings.TrimSpace(doc.Name)
 	if doc.ID == "" || doc.Name == "" || doc.CompanyID == "" || doc.ActorID == "" {
 		return &ValidationError{Message: "ID, название, компания и актор обязательны"}
@@ -296,7 +295,7 @@ func (s *Store) validateDocument(ctx context.Context, db *sql.DB, doc *domain.CJ
 	return nil
 }
 
-func referenceSet(ctx context.Context, db *sql.DB, table, companyID string) (map[string]bool, error) {
+func referenceSet(ctx context.Context, db *database, table, companyID string) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE company_id=?`, table), companyID)
 	if err != nil {
 		return nil, err
@@ -341,8 +340,13 @@ func hasCycle(adj map[string][]string) bool {
 }
 
 func (s *Store) SaveCJM(ctx context.Context, doc *domain.CJMDocument) (*domain.CJMDocument, error) {
+	return s.SaveCJMAs(ctx, doc, localUser)
+}
+
+func (s *Store) SaveCJMAs(ctx context.Context, doc *domain.CJMDocument, author string) (*domain.CJMDocument, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	author = auditName(author)
 	normalizeDocument(doc)
 	if err := s.validateDocument(ctx, s.db, doc); err != nil {
 		return nil, err
@@ -353,7 +357,7 @@ func (s *Store) SaveCJM(ctx context.Context, doc *domain.CJMDocument) (*domain.C
 	}
 	defer tx.Rollback()
 	t := now()
-	result, err := tx.ExecContext(ctx, `UPDATE cjms SET name=?,company_id=?,actor_id=?,updated_at=?,updated_by=?,row_version=row_version+1 WHERE id=? AND row_version=?`, doc.Name, doc.CompanyID, doc.ActorID, t, localUser, doc.ID, doc.RowVersion)
+	result, err := tx.ExecContext(ctx, `UPDATE cjms SET name=?,company_id=?,actor_id=?,updated_at=?,updated_by=?,row_version=row_version+1 WHERE id=? AND row_version=?`, doc.Name, doc.CompanyID, doc.ActorID, t, author, doc.ID, doc.RowVersion)
 	if err != nil {
 		return nil, translateConstraint(err)
 	}
@@ -422,7 +426,7 @@ func (s *Store) SaveCJM(ctx context.Context, doc *domain.CJMDocument) (*domain.C
 	return getCJM(ctx, s.db, doc.ID)
 }
 
-func pruneRemovedActionComments(ctx context.Context, tx *sql.Tx, doc *domain.CJMDocument) error {
+func pruneRemovedActionComments(ctx context.Context, tx *transaction, doc *domain.CJMDocument) error {
 	retained := map[string]bool{}
 	for _, stage := range doc.Stages {
 		for _, step := range stage.Steps {
@@ -461,7 +465,7 @@ func pruneRemovedActionComments(ctx context.Context, tx *sql.Tx, doc *domain.CJM
 	return nil
 }
 
-func insertActionState(ctx context.Context, tx *sql.Tx, actionID, state string, value domain.ActionState) error {
+func insertActionState(ctx context.Context, tx *transaction, actionID, state string, value domain.ActionState) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO action_states(action_id,state,sequence_doc) VALUES(?,?,?)`, actionID, state, string(value.Sequence)); err != nil {
 		return err
 	}

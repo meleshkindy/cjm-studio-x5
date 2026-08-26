@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,48 @@ import (
 	"cjmstudio/internal/domain"
 	"cjmstudio/internal/store"
 )
+
+func TestEffectiveRolePriority(t *testing.T) {
+	if got := effectiveRole([]string{"viewer", "editor"}); got != "editor" {
+		t.Fatalf("role = %q, want editor", got)
+	}
+	if got := effectiveRole([]string{"viewer", "admin", "editor"}); got != "admin" {
+		t.Fatalf("role = %q, want admin", got)
+	}
+	if got := effectiveRole([]string{"unrelated-role"}); got != "viewer" {
+		t.Fatalf("role = %q, want safe viewer default", got)
+	}
+}
+
+func TestViewerBootstrapIsFiltered(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "access.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	data, err := st.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Companies) < 2 || len(data.CJMs) == 0 {
+		t.Fatal("seed data is incomplete")
+	}
+	user, err := st.UpsertUser(context.Background(), store.UserIdentity{Subject: "viewer-sub", DisplayName: "Viewer", Role: "viewer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetUserAccess(context.Background(), user.Subject, domain.UserAccess{CJMIDs: []string{data.CJMs[0].ID}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(st)
+	filtered, err := s.filterBootstrap(context.Background(), principal{Subject: user.Subject, Role: "viewer"}, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.CJMs) != 1 || filtered.CJMs[0].ID != data.CJMs[0].ID || len(filtered.Companies) != 1 {
+		t.Fatalf("unexpected filtered bootstrap: companies=%d cjms=%d", len(filtered.Companies), len(filtered.CJMs))
+	}
+}
 
 func testHandler(t *testing.T) http.Handler {
 	t.Helper()
@@ -101,5 +144,19 @@ func TestHealthAndSecurityHeaders(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("external origin status = %d, want 403", response.Code)
+	}
+}
+
+func TestLocalAuthenticationFallback(t *testing.T) {
+	handler := testHandler(t)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/auth/config", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"enabled":false`)) {
+		t.Fatalf("auth config = %d %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/auth/me", nil))
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"role":"admin"`)) {
+		t.Fatalf("local user = %d %s", response.Code, response.Body.String())
 	}
 }

@@ -5,11 +5,13 @@ import type { Bootstrap, CJMSummary } from '../types'
 interface RegistryProps {
   data: Bootstrap
   onOpen: (id: string) => void
+  canCreate: boolean
+  canDelete: boolean
   onCreate: (input: { name: string; companyId: string; actorId: string }) => Promise<void>
   onDelete: (item: CJMSummary) => Promise<void>
 }
 
-export function Registry({ data, onOpen, onCreate, onDelete }: RegistryProps) {
+export function Registry({ data, canCreate, canDelete, onOpen, onCreate, onDelete }: RegistryProps) {
   const [query, setQuery] = useState('')
   const [companyId, setCompanyId] = useState('')
   const [actorId, setActorId] = useState('')
@@ -42,7 +44,7 @@ export function Registry({ data, onOpen, onCreate, onDelete }: RegistryProps) {
 
   return (
     <>
-      <div className="page-heading"><div><h1>Карты клиентских путей</h1><p>Все CJM компаний и акторов</p></div><button className="button primary" onClick={startCreate}><Plus size={17} />Новая CJM</button></div>
+      <div className="page-heading"><div><h1>Карты клиентских путей</h1><p>Доступные CJM компаний и акторов</p></div>{canCreate && <button className="button primary" onClick={startCreate}><Plus size={17} />Новая CJM</button>}</div>
       <section className="panel filter-panel">
         <label className="field search-field"><span>Поиск</span><span className="input-with-icon"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Название CJM" /></span></label>
         <label className="field"><span>Компания</span><select value={companyId} onChange={(event) => { setCompanyId(event.target.value); setActorId('') }}><option value="">Все компании</option>{data.companies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -50,7 +52,7 @@ export function Registry({ data, onOpen, onCreate, onDelete }: RegistryProps) {
       </section>
       <section className="panel table-panel">
         <table><thead><tr><th>Название</th><th>Компания</th><th>Актор</th><th>Редакция</th><th>Обновлено</th><th aria-label="Действия" /></tr></thead><tbody>
-          {filtered.map((item) => <tr key={item.id}><td><button className="name-link" onClick={() => onOpen(item.id)}>{item.name}</button><span className="subtext">{item.stageCount} стадий · {item.stepCount} шагов</span></td><td>{item.companyName}</td><td>{item.actorName}</td><td><span className="badge">v{item.revision}</span></td><td>{new Date(item.updatedAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</td><td><div className="row-actions"><button className="icon-button danger-ghost" aria-label="Удалить CJM" onClick={() => onDelete(item)}><Trash2 size={16} /></button><button className="icon-button" aria-label="Открыть CJM" onClick={() => onOpen(item.id)}><ArrowRight size={16} /></button></div></td></tr>)}
+          {filtered.map((item) => <tr key={item.id}><td><button className="name-link" onClick={() => onOpen(item.id)}>{item.name}</button><span className="subtext">{item.stageCount} стадий · {item.stepCount} шагов</span></td><td>{item.companyName}</td><td>{item.actorName}</td><td><span className="badge">v{item.revision}</span></td><td>{new Date(item.updatedAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</td><td><div className="row-actions">{canDelete && <button className="icon-button danger-ghost" aria-label="Удалить CJM" onClick={() => onDelete(item)}><Trash2 size={16} /></button>}<button className="icon-button" aria-label="Открыть CJM" onClick={() => onOpen(item.id)}><ArrowRight size={16} /></button></div></td></tr>)}
           {filtered.length === 0 && <tr><td colSpan={6} className="empty-cell">CJM не найдены</td></tr>}
         </tbody></table>
       </section>

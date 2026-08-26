@@ -8,7 +8,9 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -21,20 +23,39 @@ import (
 type Server struct {
 	store *store.Store
 	mux   *http.ServeMux
+	auth  *authenticator
 }
 
 func New(st *store.Store) *Server {
-	s := &Server{store: st, mux: http.NewServeMux()}
-	s.routes()
+	s, err := NewWithAuth(st, AuthConfig{})
+	if err != nil {
+		panic(err)
+	}
 	return s
 }
 
+func NewWithAuth(st *store.Store, config AuthConfig) (*Server, error) {
+	auth, err := newAuthenticator(config)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{store: st, mux: http.NewServeMux(), auth: auth}
+	s.routes()
+	return s, nil
+}
+
 func (s *Server) Handler() http.Handler {
-	return s.securityHeaders(s.logRequests(s.mux))
+	return s.securityHeaders(s.logRequests(s.authenticate(s.mux)))
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]any{"ok": true}) })
+	s.mux.HandleFunc("GET /api/auth/config", s.authConfig)
+	s.mux.HandleFunc("POST /api/auth/session", s.createSession)
+	s.mux.HandleFunc("POST /api/auth/logout", s.logout)
+	s.mux.HandleFunc("GET /api/auth/me", s.currentUser)
+	s.mux.HandleFunc("GET /api/admin/users", s.listUsers)
+	s.mux.HandleFunc("PUT /api/admin/users/{subject}/access", s.updateUserAccess)
 	s.mux.HandleFunc("GET /api/bootstrap", s.bootstrap)
 	s.mux.HandleFunc("GET /api/directories/{kind}", s.listDirectory)
 	s.mux.HandleFunc("POST /api/directories/{kind}", s.createDirectory)
@@ -65,10 +86,18 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	data, err = s.filterBootstrap(r.Context(), principalFromContext(r.Context()), data)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, data)
 }
 
 func (s *Server) listDirectory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	items, err := s.store.ListDirectory(r.Context(), r.PathValue("kind"))
 	if err != nil {
 		writeError(w, err)
@@ -78,6 +107,9 @@ func (s *Server) listDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var item domain.DirectoryRecord
 	if err := decodeJSON(r, &item); err != nil {
 		writeError(w, err)
@@ -92,6 +124,9 @@ func (s *Server) createDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateDirectory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var item domain.DirectoryRecord
 	if err := decodeJSON(r, &item); err != nil {
 		writeError(w, err)
@@ -106,6 +141,9 @@ func (s *Server) updateDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteDirectory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	if err := s.store.DeleteDirectory(r.Context(), r.PathValue("kind"), r.PathValue("id")); err != nil {
 		writeError(w, err)
 		return
@@ -114,6 +152,10 @@ func (s *Server) deleteDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createCJM(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireEditor(w, r)
+	if !ok {
+		return
+	}
 	var input struct {
 		Name      string `json:"name"`
 		CompanyID string `json:"companyId"`
@@ -123,7 +165,15 @@ func (s *Server) createCJM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	doc, err := s.store.CreateCJM(r.Context(), input.Name, input.CompanyID, input.ActorID)
+	if allowed, err := s.canAccessCompany(r.Context(), p, input.CompanyID); err != nil || !allowed {
+		if err != nil {
+			writeError(w, err)
+		} else {
+			writeForbidden(w)
+		}
+		return
+	}
+	doc, err := s.store.CreateCJMAs(r.Context(), input.Name, input.CompanyID, input.ActorID, p.DisplayName)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -132,6 +182,9 @@ func (s *Server) createCJM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getCJM(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCJMAccess(w, r, r.PathValue("id"), false) {
+		return
+	}
 	doc, err := s.store.GetCJM(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
@@ -141,13 +194,26 @@ func (s *Server) getCJM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) saveCJM(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireCJMEditor(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
 	var doc domain.CJMDocument
 	if err := decodeJSONLimit(r, &doc, 20<<20); err != nil {
 		writeError(w, err)
 		return
 	}
 	doc.ID = r.PathValue("id")
-	saved, err := s.store.SaveCJM(r.Context(), &doc)
+	currentCompanyID, err := s.store.CJMCompanyID(r.Context(), doc.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if p.Role != "admin" && doc.CompanyID != currentCompanyID {
+		writeForbidden(w)
+		return
+	}
+	saved, err := s.store.SaveCJMAs(r.Context(), &doc, p.DisplayName)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -156,6 +222,9 @@ func (s *Server) saveCJM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteCJM(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !s.requireCJMAccess(w, r, r.PathValue("id"), true) {
+		return
+	}
 	if err := s.store.DeleteCJM(r.Context(), r.PathValue("id")); err != nil {
 		writeError(w, err)
 		return
@@ -164,6 +233,9 @@ func (s *Server) deleteCJM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listActionComments(w http.ResponseWriter, r *http.Request) {
+	if !s.requireActionAccess(w, r, r.PathValue("actionId"), false) {
+		return
+	}
 	items, err := s.store.ListActionComments(r.Context(), r.PathValue("actionId"))
 	if err != nil {
 		writeError(w, err)
@@ -173,6 +245,10 @@ func (s *Server) listActionComments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createActionComment(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireActionEditor(w, r, r.PathValue("actionId"))
+	if !ok {
+		return
+	}
 	var input struct {
 		Body string `json:"body"`
 	}
@@ -180,7 +256,7 @@ func (s *Server) createActionComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	item, err := s.store.CreateActionComment(r.Context(), r.PathValue("actionId"), input.Body)
+	item, err := s.store.CreateActionCommentAs(r.Context(), r.PathValue("actionId"), input.Body, p.DisplayName)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -189,6 +265,9 @@ func (s *Server) createActionComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateActionComment(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireActionEditor(w, r, r.PathValue("actionId")); !ok {
+		return
+	}
 	var input struct {
 		Body string `json:"body"`
 	}
@@ -205,6 +284,9 @@ func (s *Server) updateActionComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteActionComment(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireActionEditor(w, r, r.PathValue("actionId")); !ok {
+		return
+	}
 	if err := s.store.DeleteActionComment(r.Context(), r.PathValue("actionId"), r.PathValue("commentId")); err != nil {
 		writeError(w, err)
 		return
@@ -213,6 +295,9 @@ func (s *Server) deleteActionComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRevisions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCJMAccess(w, r, r.PathValue("id"), false) {
+		return
+	}
 	items, err := s.store.ListRevisions(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
@@ -222,6 +307,10 @@ func (s *Server) listRevisions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createRevision(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireCJMEditor(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
 	var input struct {
 		Comment string `json:"comment"`
 		Kind    string `json:"kind"`
@@ -232,7 +321,7 @@ func (s *Server) createRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	item, err := s.store.CreateRevision(r.Context(), r.PathValue("id"), input.Comment, input.Kind)
+	item, err := s.store.CreateRevisionAs(r.Context(), r.PathValue("id"), input.Comment, input.Kind, p.DisplayName)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -249,6 +338,9 @@ func revisionNumber(r *http.Request) (int, error) {
 }
 
 func (s *Server) getRevision(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCJMAccess(w, r, r.PathValue("id"), false) {
+		return
+	}
 	number, err := revisionNumber(r)
 	if err != nil {
 		writeError(w, err)
@@ -263,12 +355,16 @@ func (s *Server) getRevision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) restoreRevision(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireCJMEditor(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
 	number, err := revisionNumber(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	doc, err := s.store.RestoreRevision(r.Context(), r.PathValue("id"), number)
+	doc, err := s.store.RestoreRevisionAs(r.Context(), r.PathValue("id"), number, p.DisplayName)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -277,6 +373,9 @@ func (s *Server) restoreRevision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uploadAsset(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireEditor(w, r); !ok {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 6<<20)
 	if err := r.ParseMultipartForm(6 << 20); err != nil {
 		writeError(w, &store.ValidationError{Message: "изображение превышает 5 МБ"})
@@ -310,6 +409,9 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	path, err := s.store.CreateBackup(r.Context())
 	if err != nil {
 		writeError(w, err)
@@ -329,6 +431,9 @@ func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 500<<20)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, &store.ValidationError{Message: "не удалось прочитать резервную копию"})
@@ -401,7 +506,21 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 }
 
 func sameOrigin(origin, host string) bool {
-	return origin == "http://"+host || origin == "https://"+host || strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "http://localhost:")
+	if origin == "http://"+host || origin == "https://"+host {
+		return true
+	}
+	hostname := host
+	if split, _, err := net.SplitHostPort(host); err == nil {
+		hostname = split
+	}
+	if hostname != "localhost" && (net.ParseIP(hostname) == nil || !net.ParseIP(hostname).IsLoopback()) {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	return parsed.Hostname() == "localhost" || (net.ParseIP(parsed.Hostname()) != nil && net.ParseIP(parsed.Hostname()).IsLoopback())
 }
 
 func (s *Server) logRequests(next http.Handler) http.Handler {

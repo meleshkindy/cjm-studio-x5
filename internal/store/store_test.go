@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,9 +10,48 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"cjmstudio/internal/domain"
 )
+
+func TestUsersAccessAndSessions(t *testing.T) {
+	st := openTestStore(t)
+	bootstrap, err := st.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := st.UpsertUser(context.Background(), UserIdentity{
+		Subject: "keycloak-subject", Username: "test.user", DisplayName: "Тестовый Пользователь", Email: "test@example.com", Role: "editor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Role != "editor" || user.DisplayName != "Тестовый Пользователь" {
+		t.Fatalf("unexpected user: %+v", user)
+	}
+	access := domain.UserAccess{CompanyIDs: []string{bootstrap.Companies[0].ID}, CJMIDs: []string{bootstrap.CJMs[0].ID}}
+	user, err = st.SetUserAccess(context.Background(), user.Subject, access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(user.CompanyIDs) != 1 || len(user.CJMIDs) != 1 || !UserCanAccess(domain.UserAccess{CompanyIDs: user.CompanyIDs, CJMIDs: user.CJMIDs}, bootstrap.CJMs[0].CompanyID, bootstrap.CJMs[0].ID) {
+		t.Fatalf("access was not saved: %+v", user)
+	}
+	if err := st.CreateSession(context.Background(), "session-hash", user.Subject, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	fromSession, err := st.SessionUser(context.Background(), "session-hash")
+	if err != nil || fromSession.Subject != user.Subject {
+		t.Fatalf("session user = %+v, err = %v", fromSession, err)
+	}
+	if err := st.DeleteSession(context.Background(), "session-hash"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SessionUser(context.Background(), "session-hash"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted session error = %v", err)
+	}
+}
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()

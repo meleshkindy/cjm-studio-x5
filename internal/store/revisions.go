@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -16,6 +15,11 @@ import (
 )
 
 func (s *Store) CreateRevision(ctx context.Context, cjmID, comment, kind string) (domain.Revision, error) {
+	return s.CreateRevisionAs(ctx, cjmID, comment, kind, localUser)
+}
+
+func (s *Store) CreateRevisionAs(ctx context.Context, cjmID, comment, kind, author string) (domain.Revision, error) {
+	author = auditName(author)
 	if kind == "" {
 		kind = "manual"
 	}
@@ -34,22 +38,28 @@ func (s *Store) CreateRevision(ctx context.Context, cjmID, comment, kind string)
 		return domain.Revision{}, err
 	}
 	defer tx.Rollback()
+	if tx.dialect == dialectPostgres {
+		var lockedID string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM cjms WHERE id=? FOR UPDATE`, cjmID).Scan(&lockedID); err != nil {
+			return domain.Revision{}, err
+		}
+	}
 	var number int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision_number),0)+1 FROM cjm_revisions WHERE cjm_id=?`, cjmID).Scan(&number); err != nil {
 		return domain.Revision{}, err
 	}
 	created := now()
 	hash := checksum(data)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO cjm_revisions(cjm_id,revision_number,comment,revision_kind,snapshot_json,checksum,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)`, cjmID, number, strings.TrimSpace(comment), kind, string(data), hash, created, localUser); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO cjm_revisions(cjm_id,revision_number,comment,revision_kind,snapshot_json,checksum,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)`, cjmID, number, strings.TrimSpace(comment), kind, string(data), hash, created, author); err != nil {
 		return domain.Revision{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE cjms SET current_revision=?,updated_at=?,updated_by=? WHERE id=?`, number, created, localUser, cjmID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE cjms SET current_revision=?,updated_at=?,updated_by=? WHERE id=?`, number, created, author, cjmID); err != nil {
 		return domain.Revision{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.Revision{}, err
 	}
-	return domain.Revision{Number: number, Comment: comment, Kind: kind, CreatedAt: created, CreatedBy: localUser}, nil
+	return domain.Revision{Number: number, Comment: comment, Kind: kind, CreatedAt: created, CreatedBy: author}, nil
 }
 
 func (s *Store) ListRevisions(ctx context.Context, cjmID string) ([]domain.Revision, error) {
@@ -89,7 +99,11 @@ func (s *Store) GetRevision(ctx context.Context, cjmID string, number int) (doma
 }
 
 func (s *Store) RestoreRevision(ctx context.Context, cjmID string, number int) (*domain.CJMDocument, error) {
-	if _, err := s.CreateRevision(ctx, cjmID, "Перед восстановлением редакции", "pre_restore"); err != nil {
+	return s.RestoreRevisionAs(ctx, cjmID, number, localUser)
+}
+
+func (s *Store) RestoreRevisionAs(ctx context.Context, cjmID string, number int, author string) (*domain.CJMDocument, error) {
+	if _, err := s.CreateRevisionAs(ctx, cjmID, "Перед восстановлением редакции", "pre_restore", author); err != nil {
 		return nil, err
 	}
 	revision, err := s.GetRevision(ctx, cjmID, number)
@@ -102,10 +116,10 @@ func (s *Store) RestoreRevision(ctx context.Context, cjmID string, number int) (
 	}
 	revision.Snapshot.RowVersion = current.RowVersion
 	revision.Snapshot.CurrentRevision = current.CurrentRevision
-	if _, err := s.SaveCJM(ctx, revision.Snapshot); err != nil {
+	if _, err := s.SaveCJMAs(ctx, revision.Snapshot, author); err != nil {
 		return nil, err
 	}
-	if _, err := s.CreateRevision(ctx, cjmID, fmt.Sprintf("Восстановлено из v%d", number), "restore"); err != nil {
+	if _, err := s.CreateRevisionAs(ctx, cjmID, fmt.Sprintf("Восстановлено из v%d", number), "restore", author); err != nil {
 		return nil, err
 	}
 	return s.GetCJM(ctx, cjmID)
@@ -136,97 +150,11 @@ func (s *Store) GetAsset(ctx context.Context, id string) (domain.Asset, error) {
 }
 
 func (s *Store) CreateBackup(ctx context.Context) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	dir := filepath.Dir(s.path)
-	file, err := os.CreateTemp(dir, "cjm-backup-*.sqlite")
-	if err != nil {
-		return "", err
-	}
-	path := file.Name()
-	file.Close()
-	os.Remove(path)
-	quoted := strings.ReplaceAll(filepath.ToSlash(path), "'", "''")
-	if _, err := s.db.ExecContext(ctx, `VACUUM INTO '`+quoted+`'`); err != nil {
-		os.Remove(path)
-		return "", err
-	}
-	return path, nil
+	return s.createPortableBackup(ctx)
 }
 
 func (s *Store) RestoreBackup(ctx context.Context, r io.Reader) error {
-	data, err := readAllLimit(r, 500*1024*1024)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, "cjm-restore-*.sqlite")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	check, err := openDB(tmpPath)
-	if err != nil {
-		os.Remove(tmpPath)
-		return &ValidationError{Message: "файл не является корректной базой CJM"}
-	}
-	var integrity string
-	if err := check.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
-		check.Close()
-		os.Remove(tmpPath)
-		return &ValidationError{Message: "резервная копия повреждена"}
-	}
-	var tables int
-	if err := check.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cjms'`).Scan(&tables); err != nil || tables != 1 {
-		check.Close()
-		os.Remove(tmpPath)
-		return &ValidationError{Message: "в резервной копии нет структуры CJM"}
-	}
-	check.Close()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.db.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	previous := s.path + ".before-restore"
-	os.Remove(previous)
-	if err := os.Rename(s.path, previous); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		os.Rename(previous, s.path)
-		s.db, _ = openDB(s.path)
-		return err
-	}
-	newDB, err := openDB(s.path)
-	if err != nil {
-		os.Remove(s.path)
-		os.Rename(previous, s.path)
-		s.db, _ = openDB(s.path)
-		return err
-	}
-	if _, err := newDB.Exec(schemaSQL); err != nil {
-		newDB.Close()
-		os.Remove(s.path)
-		os.Rename(previous, s.path)
-		s.db, _ = openDB(s.path)
-		return fmt.Errorf("обновить структуру восстановленной базы: %w", err)
-	}
-	s.db = newDB
-	os.Remove(previous)
-	return nil
+	return s.restorePortableBackup(ctx, r)
 }
 
 func RevisionChecksum(doc *domain.CJMDocument) (string, error) {

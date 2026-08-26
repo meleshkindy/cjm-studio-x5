@@ -5,13 +5,14 @@ import type { CJMDocument, Revision } from '../types'
 
 interface VersionsProps {
   document: CJMDocument
+  canEdit: boolean
   onRestored: (document: CJMDocument) => void
   onRevisionCreated: () => void
 }
 
 interface DiffItem { kind: 'added' | 'removed' | 'changed'; title: string; before?: string; after?: string }
 
-export function Versions({ document, onRestored, onRevisionCreated }: VersionsProps) {
+export function Versions({ document, canEdit, onRestored, onRevisionCreated }: VersionsProps) {
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [beforeNumber, setBeforeNumber] = useState(0)
   const [afterNumber, setAfterNumber] = useState(0)
@@ -56,8 +57,8 @@ export function Versions({ document, onRestored, onRevisionCreated }: VersionsPr
   }
 
   return <div className="versions-layout">
-    <section className="panel versions-list"><div className="panel-head"><div><h2>Редакции</h2><span>{revisions.length} сохранённых версий</span></div></div><div className="revision-create"><input value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Комментарий к версии" /><button className="button primary" disabled={busy} onClick={create}><BookmarkPlus size={16} />Сохранить</button></div><div className="revision-items">{revisions.map((revision) => <button key={revision.number} className={afterNumber === revision.number ? 'revision-item active' : 'revision-item'} onClick={() => setAfterNumber(revision.number)}><span className="revision-number">v{revision.number}</span><strong>{revision.comment || revision.kind}</strong><span>{new Date(revision.createdAt).toLocaleString('ru-RU')}</span><span className="revision-kind">{kindLabel(revision.kind)}</span></button>)}{revisions.length === 0 && <div className="empty-state"><History size={30} /><p>Сохранённых редакций пока нет</p></div>}</div></section>
-    <section className="panel comparison-panel"><div className="comparison-controls"><label className="field"><span>Было</span><select value={beforeNumber} onChange={(event) => setBeforeNumber(Number(event.target.value))}>{revisions.map((item) => <option key={item.number} value={item.number}>v{item.number} · {item.comment || item.kind}</option>)}</select></label><ArrowRight className="comparison-arrow" size={20} /><label className="field"><span>Стало</span><select value={afterNumber} onChange={(event) => setAfterNumber(Number(event.target.value))}>{revisions.map((item) => <option key={item.number} value={item.number}>v{item.number} · {item.comment || item.kind}</option>)}</select></label><button className="button" disabled={!beforeNumber || busy} onClick={() => restore(beforeNumber)}><RotateCcw size={16} />Восстановить «Было»</button></div><div className="diff-list">{diff.map((item, index) => <div className={`diff-item ${item.kind}`} key={`${item.title}-${index}`}><div className="diff-title"><CirclePlus size={16} /><strong>{item.title}</strong></div>{(item.before !== undefined || item.after !== undefined) && <div className="diff-columns"><div><span>Было</span><p>{item.before || '—'}</p></div><div><span>Стало</span><p>{item.after || '—'}</p></div></div>}</div>)}{before && after && diff.length === 0 && <div className="empty-state">Различий между редакциями нет</div>}{!before && <div className="empty-state">Создайте минимум одну редакцию для сравнения</div>}</div></section>
+    <section className="panel versions-list"><div className="panel-head"><div><h2>Редакции</h2><span>{revisions.length} сохранённых версий</span></div></div>{canEdit && <div className="revision-create"><input value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Комментарий к версии" /><button className="button primary" disabled={busy} onClick={create}><BookmarkPlus size={16} />Сохранить</button></div>}<div className="revision-items">{revisions.map((revision) => <button key={revision.number} className={afterNumber === revision.number ? 'revision-item active' : 'revision-item'} onClick={() => setAfterNumber(revision.number)}><span className="revision-number">v{revision.number}</span><strong>{revision.comment || revision.kind}</strong><span>{new Date(revision.createdAt).toLocaleString('ru-RU')}</span><span className="revision-kind">{kindLabel(revision.kind)}</span></button>)}{revisions.length === 0 && <div className="empty-state"><History size={30} /><p>Сохранённых редакций пока нет</p></div>}</div></section>
+    <section className="panel comparison-panel"><div className="comparison-controls"><label className="field"><span>Было</span><select value={beforeNumber} onChange={(event) => setBeforeNumber(Number(event.target.value))}>{revisions.map((item) => <option key={item.number} value={item.number}>v{item.number} · {item.comment || item.kind}</option>)}</select></label><ArrowRight className="comparison-arrow" size={20} /><label className="field"><span>Стало</span><select value={afterNumber} onChange={(event) => setAfterNumber(Number(event.target.value))}>{revisions.map((item) => <option key={item.number} value={item.number}>v{item.number} · {item.comment || item.kind}</option>)}</select></label>{canEdit && <button className="button" disabled={!beforeNumber || busy} onClick={() => restore(beforeNumber)}><RotateCcw size={16} />Восстановить «Было»</button>}</div><div className="diff-list">{diff.map((item, index) => <div className={`diff-item ${item.kind}`} key={`${item.title}-${index}`}><div className="diff-title"><CirclePlus size={16} /><strong>{item.title}</strong></div>{(item.before !== undefined || item.after !== undefined) && <div className="diff-columns"><div><span>Было</span><p>{item.before || '—'}</p></div><div><span>Стало</span><p>{item.after || '—'}</p></div></div>}</div>)}{before && after && diff.length === 0 && <div className="empty-state">Различий между редакциями нет</div>}{!before && <div className="empty-state">Создайте минимум одну редакцию для сравнения</div>}</div></section>
   </div>
 }
 
@@ -95,4 +96,3 @@ function flatten(document: CJMDocument) {
   })
   return map
 }
-

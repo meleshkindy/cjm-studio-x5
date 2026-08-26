@@ -13,3 +13,4 @@ web/dist/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.env
