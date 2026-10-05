@@ -64,6 +64,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/cjms", s.bootstrap)
 	s.mux.HandleFunc("POST /api/cjms", s.createCJM)
 	s.mux.HandleFunc("GET /api/cjms/{id}", s.getCJM)
+	s.mux.HandleFunc("GET /api/cjms/{id}/report", s.getCJMReport)
 	s.mux.HandleFunc("PUT /api/cjms/{id}", s.saveCJM)
 	s.mux.HandleFunc("DELETE /api/cjms/{id}", s.deleteCJM)
 	s.mux.HandleFunc("GET /api/actions/{actionId}/comments", s.listActionComments)

@@ -533,7 +533,7 @@ func (s *Store) GetCJM(ctx context.Context, id string) (*domain.CJMDocument, err
 	return getCJM(ctx, s.db, id)
 }
 
-func getCJM(ctx context.Context, db *database, id string) (*domain.CJMDocument, error) {
+func getCJM(ctx context.Context, db queryReader, id string) (*domain.CJMDocument, error) {
 	doc := &domain.CJMDocument{Stages: []domain.Stage{}, Links: []domain.StepLink{}, Initiatives: []domain.Initiative{}, InitiativeLinks: []domain.InitiativeLink{}}
 	err := db.QueryRowContext(ctx, `SELECT id,name,company_id,actor_id,created_at,updated_at,created_by,updated_by,row_version,current_revision FROM cjms WHERE id=?`, id).Scan(&doc.ID, &doc.Name, &doc.CompanyID, &doc.ActorID, &doc.CreatedAt, &doc.UpdatedAt, &doc.CreatedBy, &doc.UpdatedBy, &doc.RowVersion, &doc.CurrentRevision)
 	if err != nil {
@@ -668,7 +668,7 @@ func getCJM(ctx context.Context, db *database, id string) (*domain.CJMDocument, 
 	return doc, nil
 }
 
-func loadStateRefs(ctx context.Context, db *database, cjmID string, locations map[string][3]int, doc *domain.CJMDocument) error {
+func loadStateRefs(ctx context.Context, db queryReader, cjmID string, locations map[string][3]int, doc *domain.CJMDocument) error {
 	queries := []struct {
 		sql         string
 		participant bool

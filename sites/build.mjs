@@ -1,0 +1,18 @@
+import fs from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import {createRequire} from 'node:module';
+const require=createRequire(new URL('./web/package.json',import.meta.url));
+const build = spawnSync(process.execPath, [require.resolve('typescript/package.json').replace(/package\.json$/, 'bin/tsc'), '-b'], {cwd:'web',stdio:'inherit'});
+if(build.error)throw build.error;
+if(build.status!==0)process.exit(build.status??1);
+const vite = spawnSync(process.execPath, [require.resolve('vite/package.json').replace(/package\.json$/, 'bin/vite.js'),'build'], {cwd:'web',stdio:'inherit'});
+if(vite.error)throw vite.error;
+if(vite.status!==0)process.exit(vite.status??1);
+await fs.rm('dist',{recursive:true,force:true});
+await fs.mkdir('dist/.openai',{recursive:true});
+await fs.cp('web/dist','dist/client',{recursive:true});
+await fs.cp('worker','dist/server',{recursive:true});
+const config = JSON.parse(await fs.readFile('wrangler.jsonc','utf8'));
+config.main='index.js'; config.assets.directory='../client'; config.no_bundle=true;
+await fs.writeFile('dist/server/wrangler.json',JSON.stringify(config,null,2));
+await fs.copyFile('.openai/hosting.json','dist/.openai/hosting.json');

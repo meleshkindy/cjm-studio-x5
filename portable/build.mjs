@@ -1,0 +1,26 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {createRequire} from 'node:module';
+import {pathToFileURL} from 'node:url';
+import {randomUUID} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+const web=path.resolve('web');
+const require=createRequire(path.join(web,'package.json'));
+const {build}=await import(pathToFileURL(require.resolve('vite')).href);
+const checked=spawnSync(process.execPath,[require.resolve('typescript/package.json').replace(/package\.json$/, 'bin/tsc'),'-b'],{cwd:web,stdio:'inherit'});
+if(checked.error)throw checked.error;
+if(checked.status!==0)process.exit(checked.status??1);
+await build({root:web,base:'./',define:{'process.env.NODE_ENV':JSON.stringify('production')},build:{outDir:'dist-portable',emptyOutDir:true,cssCodeSplit:false,lib:{entry:path.join(web,'src/main.tsx'),name:'CjmPortable',formats:['iife'],fileName:()=> 'app.js'}}});
+const dir=path.join(web,'dist-portable');
+const files=await fs.readdir(dir);
+const js=await fs.readFile(path.join(dir,'app.js'),'utf8');
+const css=(await Promise.all(files.filter(f=>f.endsWith('.css')).map(f=>fs.readFile(path.join(dir,f),'utf8')))).join('\n');
+const source=process.argv[2]??await fs.access('current-data.json').then(()=>'current-data.json',()=> 'current-data.example.json');
+const backup=JSON.parse(await fs.readFile(source,'utf8'));
+if(backup.format!=='cjm-studio-sites')throw Error('Invalid backup');
+backup.packageId=randomUUID();
+const html=`<!doctype html>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#123b2e"><meta name="description" content="Автономный CJM Studio: редактор, отчёты и Excel"><title>CJM Studio — офлайн</title><style>${css}</style></head><body><div id="root"><p style="padding:32px;font:16px sans-serif">Загрузка CJM Studio… Откройте файл в Chrome или Edge.</p></div><script id="cjm-offline-data" type="application/json">${JSON.stringify(backup).replaceAll('<','\\u003c')}</script><script id="cjm-app-source">${js.replaceAll('</script','<\\/script')}</script></body></html>`;
+await fs.mkdir('output',{recursive:true});
+await fs.writeFile('output/CJM-Studio.html',html);
+console.log(JSON.stringify({file:path.resolve('output/CJM-Studio.html'),bytes:Buffer.byteLength(html),maps:Object.keys(backup.records).filter(k=>k.startsWith('cjm:')).length,packageId:backup.packageId}));

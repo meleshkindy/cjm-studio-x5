@@ -1,0 +1,70 @@
+import fs from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {webcrypto} from 'node:crypto';
+import {JSDOM,VirtualConsole} from 'jsdom';
+import {IDBFactory} from 'fake-indexeddb';
+const require=createRequire(new URL('./web/package.json',import.meta.url));
+const ExcelJS=require('exceljs');
+const html=await fs.readFile('output/CJM-Studio.html','utf8');
+const indexedDB=new IDBFactory();
+const errors=[],network=[],downloads=[];
+function open(content) {
+  const console=new VirtualConsole();
+  console.on('jsdomError',e=>{if(!e.message.includes('Not implemented'))errors.push(String(e));});
+  return new JSDOM(content,{url:'https://offline-unit-test.invalid/',runScripts:'dangerously',pretendToBeVisual:true,virtualConsole:console,beforeParse(w){
+    Object.assign(w,{indexedDB,structuredClone,Request,Response,Headers,Blob,File,FormData,TextEncoder,TextDecoder,ReadableStream});
+    Object.defineProperty(w,'crypto',{value:webcrypto});
+    w.fetch=async(...args)=>{network.push(args);throw Error('External network is forbidden in offline test');};
+    w.URL.createObjectURL=blob=>{downloads.push(blob);return 'blob:offline-test/'+downloads.length;};
+    w.URL.revokeObjectURL=()=>{};
+    w.confirm=()=>true;w.alert=()=>{};
+    w.ResizeObserver=class{observe(){}unobserve(){}disconnect(){}};
+    w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
+    w.document.addEventListener('click',event=>{if(event.target.closest('a[download]'))event.preventDefault();});
+  }});
+}
+async function wait(check,label) {for(let i=0;i<200;i++){if(check())return;await new Promise(r=>setTimeout(r,25));}throw Error('Timed out: '+label+'; errors: '+errors.join('; '));}
+function button(w,text) {return [...w.document.querySelectorAll('button')].find(b=>b.textContent.trim()===text);}
+async function api(w,path,method='GET',value) {const res=await w.fetch(path,{method,...(value?{body:JSON.stringify(value),headers:{'Content-Type':'application/json'}}:{})});assert.ok(res.ok,`${path}: ${res.status} ${await(res.ok?Promise.resolve(''):res.text())}`);return res.status===204?null:res.json();}
+let w=open(html).window;
+await wait(()=>w.document.querySelector('h1')?.textContent==='Карты клиентских путей','application boot');
+assert.equal(w.document.querySelectorAll('script[src],link[rel=stylesheet]').length,0);
+const data=await api(w,'/api/bootstrap');
+const embedded=JSON.parse(w.document.getElementById('cjm-offline-data').textContent);
+assert.equal(data.cjms.length,Object.keys(embedded.records).filter(k=>k.startsWith('cjm:')).length);
+const company=await api(w,'/api/directories/companies','POST',{code:'TEST-'+webcrypto.randomUUID(),name:'Тестовая компания'});
+const actor=await api(w,'/api/directories/actors','POST',{code:'TEST',name:'Тестовый актор',companyId:company.id});
+const created=await api(w,'/api/cjms','POST',{name:'Тестовая карта',companyId:company.id,actorId:actor.id});
+const rich={type:'doc',content:[{type:'paragraph'}]};
+const action={id:webcrypto.randomUUID(),name:'Тестовое действие',position:0,description:'',goal:rich,meaning:rich,pains:rich,openQuestions:'',asIs:{participants:[],systems:[],sequence:rich},toBe:{participants:[],systems:[],sequence:rich}};
+created.stages=[{id:webcrypto.randomUUID(),name:'Стадия',description:'',position:0,steps:[{id:webcrypto.randomUUID(),name:'Шаг',description:'',position:0,actions:[action]}]}];
+const initial=await api(w,'/api/cjms/'+created.id,'PUT',created);
+const saved=await api(w,'/api/cjms/'+initial.id,'PUT',{...initial,name:'Проверка автономного сохранения'});
+assert.equal(saved.rowVersion,initial.rowVersion+1);
+const stale=await w.fetch('/api/cjms/'+initial.id,{method:'PUT',body:JSON.stringify(initial)});assert.equal(stale.status,409);
+const reopened=open(html);await wait(()=>button(reopened.window,'Проверка автономного сохранения'),'persistent reload');
+reopened.window.close();
+await api(w,'/api/cjms/'+initial.id,'PUT',{...saved,name:initial.name});
+w.close();w=open(html).window;await wait(()=>button(w,initial.name),'reload fixture');
+button(w,initial.name).click();await wait(()=>button(w,'Отчёт'),'open CJM');button(w,'Отчёт').click();
+await wait(()=>button(w,'Excel: полный отчёт'),'report');
+const before=downloads.length;button(w,'Excel: полный отчёт').click();await wait(()=>downloads.length>before,'Excel export');
+const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(await downloads.at(-1).arrayBuffer());
+assert.equal(workbook.getWorksheet('Действия').rowCount,2);
+for(const sheet of workbook.worksheets)sheet.eachRow(row=>row.eachCell(cell=>assert.ok(!/^ID(?:\s|$)/.test(String(cell.value??'')))));
+const image=new FormData();image.append('file',new Blob([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/hGQAAAAASUVORK5CYII=','base64')],{type:'image/png'}),'pixel.png');
+const upload=await w.fetch('/api/assets',{method:'POST',body:image});assert.equal(upload.status,201);const asset=await upload.json();
+assert.equal((await w.fetch(asset.url)).headers.get('content-type'),'image/png');
+const newest=await api(w,'/api/cjms/'+initial.id);await api(w,'/api/cjms/'+initial.id,'PUT',{...newest,name:'Карта в отправляемом HTML'});
+button(w,'Резервные копии').click();await wait(()=>button(w,'Скачать HTML'),'portable export UI');
+const previous=downloads.length;button(w,'Скачать HTML').click();await wait(()=>downloads.length>previous,'HTML download');
+const sentHtml=await downloads.at(-1).text();assert.ok(sentHtml.startsWith('<!doctype html>'));
+assert.equal(new JSDOM(sentHtml).window.document.querySelectorAll('script').length,2);
+const sent=open(sentHtml);await wait(()=>button(sent.window,'Карта в отправляемом HTML'),'exported file bootstrap');
+const copy=await api(sent.window,'/api/backup');assert.ok(copy.assets[asset.id]);
+const restore=new FormData();restore.append('backup',new Blob([JSON.stringify(copy)]),'backup.json');
+assert.equal((await w.fetch('/api/restore',{method:'POST',body:restore})).status,200);
+assert.equal(network.length,0,'No external fetch calls');assert.deepEqual(errors,[]);
+console.log(JSON.stringify({boot:true,persistence:true,staleWriteProtection:true,excelRows:2,images:true,selfExport:true,backupRestore:true,externalRequests:network.length}));
+sent.window.close();w.close();

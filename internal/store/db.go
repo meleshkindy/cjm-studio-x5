@@ -25,6 +25,11 @@ type database struct {
 	dialect databaseDialect
 }
 
+type queryReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (db *database) query(query string) string {
 	if db.dialect == dialectPostgres {
 		return rebindPostgres(query)

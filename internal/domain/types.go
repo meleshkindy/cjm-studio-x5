@@ -151,3 +151,11 @@ type Asset struct {
 	Size        int64
 	Data        []byte
 }
+
+type CJMReport struct {
+	GeneratedAt string          `json:"generatedAt"`
+	Document    *CJMDocument    `json:"document"`
+	Directories Bootstrap       `json:"directories"`
+	Comments    []ActionComment `json:"comments"`
+	Revisions   []Revision      `json:"revisions"`
+}

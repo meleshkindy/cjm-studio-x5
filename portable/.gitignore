@@ -1,0 +1,8 @@
+node_modules/
+web/node_modules/
+web/dist-portable/
+*.tsbuildinfo
+
+/output/
+/current-data.json
+.env*

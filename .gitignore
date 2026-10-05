@@ -14,3 +14,7 @@ web/dist/
 *.sqlite-shm
 *.sqlite-wal
 .env
+
+# Generated dependencies and private local exports in all distributions
+node_modules/
+*.tsbuildinfo
